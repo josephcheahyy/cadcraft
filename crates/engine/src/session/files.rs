@@ -33,6 +33,23 @@ impl Session {
             let (center, w, h) = View::twisted_box(ext, twist);
             st.set_view_quiet(View { center, height: (h.max(w * self.viewport_px.1 / self.viewport_px.0.max(1.0)) * 1.1).max(1e-6), twist });
         }
+        // When saved in Paper Space (`$TILEMODE == 0`), open on the saved active layout (or the
+        // first layout by tab order) framed to its sheet, keeping the Model view above intact.
+        if st.doc.header.i64("TILEMODE", 1) == 0 {
+            let layout = st
+                .doc
+                .active_layout
+                .as_deref()
+                .and_then(|n| st.doc.layout(n))
+                .or_else(|| st.doc.layouts.iter().min_by_key(|l| l.tab_order))
+                .map(|l| l.name.clone());
+            if let Some(name) = layout {
+                st.space = Space::Paper(name.clone());
+                if let Some(sh) = cadcraft_render::paper::sheet(&st.doc, &name) {
+                    st.set_view_quiet(View { center: sh.bounds().center(), height: sh.size.y * 1.15, twist: 0.0 });
+                }
+            }
+        }
         self.end_running();
         self.docs.push(st);
         self.active = self.docs.len() - 1;
@@ -67,5 +84,41 @@ impl Session {
                 Err(EngineError::Internal("open".into(), "panic".into()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_drawing_restores_saved_active_layout_when_tilemode_is_zero() {
+        let mut d = Drawing::new_imperial();
+        d.header.set_i64("TILEMODE", 0);
+        d.active_layout = Some("Layout2".into());
+        let l2 = d.layouts.iter_mut().find(|l| l.name == "Layout2").unwrap();
+        l2.page.width_mm = 297.0;
+        l2.page.height_mm = 210.0;
+        l2.page.landscape = true;
+        l2.page.paper_mm = Some(true);
+
+        let mut s = Session::empty();
+        s.open_drawing(d, "sheet.dxf", None);
+        assert_eq!(s.space(), Space::Paper("Layout2".into()));
+        let sh = cadcraft_render::paper::sheet(s.doc().unwrap(), "Layout2").unwrap();
+        let v = s.state().unwrap().view();
+        assert!(v.center.dist(sh.bounds().center()) < 1e-9, "got {:?}", v.center);
+        assert!((v.height - sh.size.y * 1.15).abs() < 1e-9, "got {}", v.height);
+
+        // When TILEMODE is 1 (or unset), open_drawing opens on Model space as before.
+        let mut d_model = Drawing::new_metric();
+        d_model.header.set_i64("TILEMODE", 1);
+        d_model.active_layout = Some("Layout2".into());
+        s.open_drawing(d_model, "model.dxf", None);
+        assert_eq!(s.space(), Space::Model);
+
+        let d_unset = Drawing::new_metric();
+        s.open_drawing(d_unset, "unset.dxf", None);
+        assert_eq!(s.space(), Space::Model);
     }
 }
