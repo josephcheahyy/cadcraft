@@ -326,12 +326,10 @@ fn run_layout_set(s: &mut Session, p: &Value) -> Result<Value> {
     st.selection.clear();
     if let Space::Paper(n) = &space
         && !st.views.iter().any(|(sp, _)| sp == &space)
+        && let Some(sh) = cadcraft_render::paper::sheet(&st.doc, n)
     {
-        // Default paper view: the sheet.
-        let page = st.doc.layout(n).map(|l| l.page.clone()).unwrap_or_default();
-        let (w, h) = if page.landscape { (page.height_mm, page.width_mm) } else { (page.width_mm, page.height_mm) };
-        let unit = if st.doc.header.i64("MEASUREMENT", 0) == 1 { 1.0 } else { 1.0 / 25.4 };
-        st.set_view_quiet(View { center: Vec2::new(w * unit / 2.0, h * unit / 2.0), height: h * unit * 1.15, twist: 0.0 });
+        // Default paper view: the layout's sheet in its own paper units.
+        st.set_view_quiet(View { center: sh.bounds().center(), height: sh.size.y * 1.15, twist: 0.0 });
     }
     s.touch();
     ok()
@@ -705,5 +703,32 @@ impl Interactive for PanPointsM {
             (None, Input::Enter) => Ok(Step::Done),
             _ => Ok(Step::Continue),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cadcraft_doc::Drawing;
+
+    #[test]
+    fn layout_set_initial_view_uses_sheet_paper_units_and_orientation() {
+        // Imperial MEASUREMENT = 0, but layout explicitly uses mm (paper_mm = Some(true))
+        // with width_mm > height_mm already in landscape order.
+        let mut d = Drawing::new_imperial();
+        let l = d.layouts.iter_mut().find(|l| l.name == "Layout1").unwrap();
+        l.page.width_mm = 297.0;
+        l.page.height_mm = 210.0;
+        l.page.landscape = true;
+        l.page.paper_mm = Some(true);
+
+        let mut s = Session::new();
+        s.state_mut().unwrap().doc = d.into();
+        s.execute("layout.set", &json!({ "name": "Layout1" })).unwrap();
+        let v = s.state().unwrap().view();
+        let sh = cadcraft_render::paper::sheet(s.doc().unwrap(), "Layout1").unwrap();
+        assert!(v.center.dist(sh.bounds().center()) < 1e-9, "expected sheet center {:?}, got {:?}", sh.bounds().center(), v.center);
+        assert!(v.center.x > v.center.y, "landscape sheet should stay wider than tall: {:?}", v.center);
+        assert!((v.height - sh.size.y * 1.15).abs() < 1e-9, "expected sheet height {}, got {}", sh.size.y * 1.15, v.height);
     }
 }
